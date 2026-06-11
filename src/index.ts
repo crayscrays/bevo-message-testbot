@@ -307,7 +307,21 @@ agent.command("request", async (ctx) => {
     ctx.reply("Usage: /request @user");
     return;
   }
+
+  // Look up the target user's wallet address
+  let targetWallet: string | null = null;
+  try {
+    const user = await ctx.client.getUser(resolved.principalId);
+    targetWallet = user.walletAddress;
+  } catch {
+    // wallet lookup failed — proceed without showing their address
+  }
+
   const displayName = resolved.displayName ?? resolved.username ?? resolved.principalId;
+  const fromField = targetWallet
+    ? `${displayName} (${targetWallet.slice(0, 6)}…${targetWallet.slice(-4)})`
+    : displayName;
+
   const d = await ctx.defer();
   await d.updateWith({
     contentType: "payment_request",
@@ -318,6 +332,7 @@ agent.command("request", async (ctx) => {
       fields: [
         { label: "Amount", value: "0.01 USDC" },
         { label: "To", value: BOT_WALLET! },
+        { label: "From", value: fromField },
         { label: "Network", value: "Base" },
       ],
       actions: [
