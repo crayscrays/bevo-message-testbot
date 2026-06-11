@@ -175,19 +175,68 @@ agent.command("contract", async (ctx) => {
   });
 }, { description: "Send a contract_call (sign to execute)" });
 
-// 10. butler_action
+// 10a. butler_action — fan-out to ALL group members with a provisioned butler
 agent.command("butler", async (ctx) => {
+  if (!ctx.payload.groupId || !ctx.payload.channelId) {
+    ctx.reply("This command only works in a group channel.");
+    return;
+  }
   const d = await ctx.defer();
-  await d.updateWith({
+  // sendMessage with targets triggers the server-side fan-out + policy evaluation
+  await (ctx.client.sendMessage as Function)({
+    groupId: ctx.payload.groupId,
+    channelId: ctx.payload.channelId,
     contentType: "butler_action",
     content: "Butler wants to swap 0.01 USDC → ETH on your behalf.",
     metadata: {
       executionStatus: "pending_action",
-      actionType: "swap",
-      params: { fromToken: "USDC", toToken: "ETH", amount: "0.01" },
+      execution: {
+        type: "butler_action",
+        amount: "0.01",
+        currency: "USDC",
+        description: "Swap 0.01 USDC → ETH",
+      },
     },
+    targets: "all_butlers", // broadcast to every member with a provisioned butler
   });
-}, { description: "Send a butler_action" });
+  await d.update("Butler action sent to all group members. Each member's policy will decide auto-execute or approval DM.");
+}, { description: "Fan-out a butler action to all group members" });
+
+// 10b. butler_action — fan-out to a single @user
+agent.command("butler-one", async (ctx) => {
+  if (!ctx.payload.groupId || !ctx.payload.channelId) {
+    ctx.reply("This command only works in a group channel.");
+    return;
+  }
+  const userId = ctx.payload.options["user"] as string | undefined;
+  const resolved = userId ? ctx.payload.resolved.users[userId] : null;
+  if (!resolved) {
+    ctx.reply("Usage: /butler-one @user");
+    return;
+  }
+  const d = await ctx.defer();
+  await (ctx.client.sendMessage as Function)({
+    groupId: ctx.payload.groupId,
+    channelId: ctx.payload.channelId,
+    contentType: "butler_action",
+    content: `Butler wants to swap 0.01 USDC → ETH on behalf of @${resolved.username ?? resolved.principalId}.`,
+    metadata: {
+      executionStatus: "pending_action",
+      execution: {
+        type: "butler_action",
+        amount: "0.01",
+        currency: "USDC",
+        description: "Swap 0.01 USDC → ETH",
+        toPrincipalId: resolved.principalId,
+      },
+    },
+    targets: [resolved.principalId], // target a single specific user
+  });
+  await d.update(`Butler action sent to ${resolved.displayName ?? resolved.username ?? resolved.principalId}.`);
+}, {
+  description: "Fan-out a butler action to a specific user",
+  options: [{ name: "user", type: "user" as const, description: "Target user", required: true }],
+});
 
 // 11. approval_request
 agent.command("approve", async (ctx) => {
@@ -267,7 +316,8 @@ agent.command("all", async (ctx) => {
         { name: "/ephemeral",  value: "ephemeral",        inline: true },
         { name: "/payment",    value: "payment_request",  inline: true },
         { name: "/contract",   value: "contract_call",    inline: true },
-        { name: "/butler",     value: "butler_action",    inline: true },
+        { name: "/butler",     value: "butler_action → all",  inline: true },
+        { name: "/butler-one", value: "butler_action → @user", inline: true },
         { name: "/approve",    value: "approval_request", inline: true },
         { name: "/reply",      value: "reply",            inline: true },
         { name: "/attachment", value: "attachment",       inline: true },
