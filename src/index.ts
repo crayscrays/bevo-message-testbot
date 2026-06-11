@@ -2,9 +2,10 @@ import "dotenv/config";
 import express from "express";
 import { BevoAgent } from "../../bevo-agent-sdk/src/index.js";
 
-const { BEVO_API_KEY, BEVO_API_BASE, PORT } = process.env;
+const { BEVO_API_KEY, BEVO_API_BASE, PORT, BOT_WALLET } = process.env;
 if (!BEVO_API_KEY) throw new Error("BEVO_API_KEY is required — copy .env.example to .env");
 if (!BEVO_API_BASE) throw new Error("BEVO_API_BASE is required — copy .env.example to .env");
+if (!BOT_WALLET) throw new Error("BOT_WALLET is required — set the bot's EVM wallet address in .env");
 
 const agent = new BevoAgent({ apiKey: BEVO_API_KEY, apiBase: BEVO_API_BASE });
 
@@ -298,6 +299,48 @@ agent.command("link", async (ctx) => {
   });
 }, { description: "Send a link unfurl" });
 
+// 15. request — ask a tagged user to pay 0.01 USDC to this bot's wallet
+agent.command("request", async (ctx) => {
+  const userId = ctx.payload.options["user"] as string | undefined;
+  const resolved = userId ? ctx.payload.resolved.users[userId] : null;
+  if (!resolved) {
+    ctx.reply("Usage: /request @user");
+    return;
+  }
+  const displayName = resolved.displayName ?? resolved.username ?? resolved.principalId;
+  const d = await ctx.defer();
+  await d.updateWith({
+    contentType: "payment_request",
+    card: {
+      type: "payment_request",
+      title: "Payment Request",
+      description: `Requesting 0.01 USDC from ${displayName}.`,
+      fields: [
+        { label: "Amount", value: "0.01 USDC" },
+        { label: "To", value: BOT_WALLET! },
+        { label: "Network", value: "Base" },
+      ],
+      actions: [
+        {
+          id: "pay",
+          label: "Pay 0.01 USDC",
+          type: "transaction",
+          payload: {
+            token: "USDC",
+            amount: "0.01",
+            recipient: BOT_WALLET,
+            chainId: 8453,
+          },
+        },
+      ],
+    },
+    metadata: { executionStatus: "pending_action" },
+  });
+}, {
+  description: "Request 0.01 USDC from a tagged user to this bot's wallet",
+  options: [{ name: "user", type: "user" as const, description: "User to request payment from", required: true }],
+});
+
 // /all — index of every command
 agent.command("all", async (ctx) => {
   const d = await ctx.defer();
@@ -322,6 +365,7 @@ agent.command("all", async (ctx) => {
         { name: "/reply",      value: "reply",            inline: true },
         { name: "/attachment", value: "attachment",       inline: true },
         { name: "/link",       value: "link_unfurl",      inline: true },
+        { name: "/request",    value: "payment_request → @user", inline: true },
       ],
     },
   });
