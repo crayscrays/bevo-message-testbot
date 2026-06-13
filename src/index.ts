@@ -555,15 +555,13 @@ async function main() {
     console.warn("[testbot] Virtuals token fetch failed — using Base-only list:", (err as Error).message);
   }
 
-  const tokenChoices = Object.keys(TOKENS);
-
-  // Register tradelifi with the now-populated choices
+  // Register tradelifi with the now-populated token list
   agent.command("tradelifi", tradeLifiHandler, {
     description: "Swap tokens via Li.Fi DEX aggregator (Base only)",
     options: [
       { name: "token-in",  type: "token" as const,  description: "Token to sell from your wallet", required: true },
       { name: "amount-in", type: "string" as const,  description: "Amount to sell (e.g. 100)",      required: true },
-      { name: "token-out", type: "string" as const,  description: "Token to buy",                   required: true, choices: tokenChoices },
+      { name: "token-out", type: "string" as const,  description: "Token to buy",                   required: true, choices: Object.keys(BASE_TOKENS) },
     ],
   });
 
