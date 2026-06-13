@@ -8,7 +8,6 @@ import {
   fetchAllowance,
   toAmountRaw,
   formatAmount,
-  isAddress,
   ERC20_APPROVE_ABI,
   BASE_CHAIN_ID,
 } from "./lifi.js";
@@ -390,29 +389,30 @@ async function tradeLifiHandler(ctx: CommandContext): Promise<void> {
 
   const d = await ctx.defer();
 
-  // Resolve a token input: known symbol → use the map (no RPC), raw address → fetch decimals on-chain.
   type TokenMeta = { address: `0x${string}`; decimals: number; symbol: string };
-  async function resolveToken(input: string): Promise<TokenMeta | null> {
-    if (TOKENS[input]) return TOKENS[input];
-    if (isAddress(input)) {
-      const decimals = await fetchTokenDecimals(input);
-      return { address: input, decimals, symbol: `${input.slice(0, 6)}…${input.slice(-4)}` };
-    }
-    return null;
-  }
 
   // Phase 1 — resolve both tokens + wallet in parallel
   let tokenInMeta: TokenMeta | null = null;
   let tokenOutMeta: TokenMeta | null = null;
   let wallet: `0x${string}` | null = null;
   try {
-    const [inMeta, outMeta, user] = await Promise.all([
-      resolveToken(tokenInKey),
-      resolveToken(tokenOutKey),
+    // token-in: from user's wallet picker — address comes from resolved.tokens, decimals from our map or on-chain
+    const resolvedIn = ctx.payload.resolved.tokens[tokenInKey];
+    async function resolveTokenIn(): Promise<TokenMeta | null> {
+      if (!resolvedIn) return null;
+      const addr = resolvedIn.address as `0x${string}`;
+      const known = TOKENS[resolvedIn.symbol];
+      if (known) return known;
+      const decimals = await fetchTokenDecimals(addr);
+      return { address: addr, decimals, symbol: resolvedIn.symbol };
+    }
+
+    const [inMeta, user] = await Promise.all([
+      resolveTokenIn(),
       ctx.client.getUser(ctx.payload.senderId),
     ]);
     tokenInMeta  = inMeta;
-    tokenOutMeta = outMeta;
+    tokenOutMeta = TOKENS[tokenOutKey] ?? null;
     wallet = user.walletAddress as `0x${string}` | null;
   } catch (err) {
     await d.update(`Could not resolve tokens or wallet: ${(err as Error).message}`);
@@ -420,11 +420,11 @@ async function tradeLifiHandler(ctx: CommandContext): Promise<void> {
   }
 
   if (!tokenInMeta) {
-    await d.update(`"${tokenInKey}" is not a recognised token symbol or valid contract address.`);
+    await d.update(`Could not resolve "${tokenInKey}" from your wallet — token details missing.`);
     return;
   }
   if (!tokenOutMeta) {
-    await d.update(`"${tokenOutKey}" is not a recognised token symbol or valid contract address.`);
+    await d.update(`"${tokenOutKey}" is not a recognised token in our list.`);
     return;
   }
   if (tokenInMeta.address.toLowerCase() === tokenOutMeta.address.toLowerCase()) {
@@ -561,9 +561,9 @@ async function main() {
   agent.command("tradelifi", tradeLifiHandler, {
     description: "Swap tokens via Li.Fi DEX aggregator (Base only)",
     options: [
-      { name: "token-in",  type: "string" as const, description: "Token to sell",            required: true, choices: tokenChoices },
-      { name: "amount-in", type: "string" as const, description: "Amount to sell (e.g. 100)", required: true },
-      { name: "token-out", type: "string" as const, description: "Token to buy",              required: true, choices: tokenChoices },
+      { name: "token-in",  type: "token" as const,  description: "Token to sell from your wallet", required: true },
+      { name: "amount-in", type: "string" as const,  description: "Amount to sell (e.g. 100)",      required: true },
+      { name: "token-out", type: "string" as const,  description: "Token to buy",                   required: true, choices: tokenChoices },
     ],
   });
 
