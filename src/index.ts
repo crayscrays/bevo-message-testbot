@@ -1,6 +1,22 @@
 import "dotenv/config";
 import express from "express";
-import { BevoAgent } from "../../bevo-agent-sdk/src/index.js";
+import { BevoAgent } from "@bevo/agent-sdk";
+import type { CommandContext } from "@bevo/agent-sdk";
+import {
+  getLifiQuote,
+  fetchTokenDecimals,
+  fetchAllowance,
+  toAmountRaw,
+  formatAmount,
+  isAddress,
+  ERC20_APPROVE_ABI,
+  BASE_CHAIN_ID,
+} from "./lifi.js";
+import { BASE_TOKENS, fetchTopVirtualsTokens, type Token } from "./tokens.js";
+
+// Populated in main() before any request arrives.
+// Handler closes over this reference — no stale reads.
+let TOKENS: Record<string, Token> = { ...BASE_TOKENS };
 
 const { BEVO_API_KEY, BEVO_API_BASE, PORT, BOT_WALLET } = process.env;
 if (!BEVO_API_KEY) throw new Error("BEVO_API_KEY is required — copy .env.example to .env");
@@ -356,6 +372,145 @@ agent.command("request", async (ctx) => {
   options: [{ name: "user", type: "user" as const, description: "User to request payment from", required: true }],
 });
 
+// 16. tradelifi — handler extracted so main() can register it with dynamic choices
+async function tradeLifiHandler(ctx: CommandContext): Promise<void> {
+  const tokenInKey    = ctx.payload.options["token-in"]   as string | undefined;
+  const amountInHuman = ctx.payload.options["amount-in"]  as string | undefined;
+  const tokenOutKey   = ctx.payload.options["token-out"]  as string | undefined;
+
+  if (!tokenInKey || !amountInHuman || !tokenOutKey) {
+    ctx.reply("Usage: /tradelifi <token-in> <amount-in> <token-out>");
+    return;
+  }
+  const amountNum = Number(amountInHuman);
+  if (isNaN(amountNum) || amountNum <= 0) {
+    ctx.reply("amount-in must be a positive number.");
+    return;
+  }
+
+  const d = await ctx.defer();
+
+  // Resolve a token input: known symbol → use the map (no RPC), raw address → fetch decimals on-chain.
+  type TokenMeta = { address: `0x${string}`; decimals: number; symbol: string };
+  async function resolveToken(input: string): Promise<TokenMeta | null> {
+    if (TOKENS[input]) return TOKENS[input];
+    if (isAddress(input)) {
+      const decimals = await fetchTokenDecimals(input);
+      return { address: input, decimals, symbol: `${input.slice(0, 6)}…${input.slice(-4)}` };
+    }
+    return null;
+  }
+
+  // Phase 1 — resolve both tokens + wallet in parallel
+  let tokenInMeta: TokenMeta | null = null;
+  let tokenOutMeta: TokenMeta | null = null;
+  let wallet: `0x${string}` | null = null;
+  try {
+    const [inMeta, outMeta, user] = await Promise.all([
+      resolveToken(tokenInKey),
+      resolveToken(tokenOutKey),
+      ctx.client.getUser(ctx.payload.senderId),
+    ]);
+    tokenInMeta  = inMeta;
+    tokenOutMeta = outMeta;
+    wallet = user.walletAddress as `0x${string}` | null;
+  } catch (err) {
+    await d.update(`Could not resolve tokens or wallet: ${(err as Error).message}`);
+    return;
+  }
+
+  if (!tokenInMeta) {
+    await d.update(`"${tokenInKey}" is not a recognised token symbol or valid contract address.`);
+    return;
+  }
+  if (!tokenOutMeta) {
+    await d.update(`"${tokenOutKey}" is not a recognised token symbol or valid contract address.`);
+    return;
+  }
+  if (tokenInMeta.address.toLowerCase() === tokenOutMeta.address.toLowerCase()) {
+    await d.update("token-in and token-out cannot be the same token.");
+    return;
+  }
+  if (!wallet) {
+    await d.update("No wallet found for your account. Please register a wallet first.");
+    return;
+  }
+
+  let amountInRaw: bigint;
+  try {
+    amountInRaw = toAmountRaw(amountInHuman, tokenInMeta.decimals);
+  } catch {
+    await d.update(`Invalid amount "${amountInHuman}" for ${tokenInMeta.symbol} (${tokenInMeta.decimals} decimals).`);
+    return;
+  }
+
+  // Phase 2 — Li.Fi quote (returns best route + pre-encoded calldata + approval address)
+  let quote: Awaited<ReturnType<typeof getLifiQuote>>;
+  try {
+    quote = await getLifiQuote(tokenInMeta.address, tokenOutMeta.address, amountInRaw, wallet);
+  } catch (err) {
+    await d.update(`Could not get Li.Fi quote: ${(err as Error).message}`);
+    return;
+  }
+
+  // Phase 3 — check allowance now that we know approvalAddress
+  let allowance = 0n;
+  try {
+    allowance = await fetchAllowance(tokenInMeta.address, wallet, quote.approvalAddress as `0x${string}`);
+  } catch (err) {
+    await d.update(`Could not check allowance: ${(err as Error).message}`);
+    return;
+  }
+
+  const minOutFormatted = formatAmount(quote.toAmountMin, quote.tokenOutDecimals);
+  const needsApproval = allowance < amountInRaw;
+
+  await d.updateWith({
+    contentType: "contract_call",
+    card: {
+      type: "app_card",
+      title: `Swap ${amountInHuman} ${quote.tokenInSymbol} → ${quote.tokenOutSymbol}`,
+      description: needsApproval
+        ? `Requires 2 signatures: approve ${quote.tokenInSymbol}, then swap. Best route via ${quote.tool}.`
+        : `Best route via ${quote.tool} — found by Li.Fi.`,
+      fields: [
+        { label: "Sell",         value: `${amountInHuman} ${quote.tokenInSymbol}` },
+        { label: "Min. receive", value: `${minOutFormatted} ${quote.tokenOutSymbol}` },
+        { label: "Slippage",     value: "0.5%" },
+        { label: "Route",        value: quote.tool },
+        { label: "Network",      value: "Base" },
+        ...(needsApproval ? [{ label: "Approval", value: `Required for ${quote.tokenInSymbol}` }] : []),
+      ],
+    },
+    metadata: {
+      executionStatus: "pending_action",
+      // Primary execution = the swap
+      execution: {
+        type: "contract_call",
+        chainId: BASE_CHAIN_ID,
+        contractAddress: quote.transactionRequest.to,
+        description: `Swap ${amountInHuman} ${quote.tokenInSymbol} → ${quote.tokenOutSymbol} via Li.Fi (Base)`,
+        amount: amountInHuman,
+        currency: quote.tokenInSymbol,
+        fromPrincipalId: ctx.payload.senderId,
+      },
+      // Pre-encoded calldata from Li.Fi — client sends this transaction directly.
+      transactionRequest: quote.transactionRequest,
+      // If approval is needed, client executes this first, then the swap.
+      ...(needsApproval ? {
+        approvalRequired: true,
+        approvalExecution: {
+          chainId: BASE_CHAIN_ID,
+          contractAddress: tokenInMeta.address,
+          functionName: "approve",
+          args: [quote.approvalAddress, amountInRaw.toString()],
+          abi: ERC20_APPROVE_ABI,
+        },
+      } : {}),
+    },
+  });
+}
+
 // /all — index of every command
 agent.command("all", async (ctx) => {
   const d = await ctx.defer();
@@ -380,25 +535,53 @@ agent.command("all", async (ctx) => {
         { name: "/reply",      value: "reply",            inline: true },
         { name: "/attachment", value: "attachment",       inline: true },
         { name: "/link",       value: "link_unfurl",      inline: true },
-        { name: "/request",    value: "payment_request → @user", inline: true },
+        { name: "/request",    value: "payment_request → @user",       inline: true },
+        { name: "/tradelifi", value: "contract_call → Li.Fi DEX swap",  inline: true },
       ],
     },
   });
 }, { description: "List all wrapper commands" });
 
-// ── server ────────────────────────────────────────────────────────────────────
-const app = express();
-app.use(express.json());
-app.post("/webhook", agent.express());
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
-const port = Number(PORT ?? 3001);
-app.listen(port, async () => {
-  console.log(`[testbot] http://localhost:${port}/webhook`);
+// ── main: fetch dynamic token list, register tradelifi, start server ─────────
+async function main() {
+  // Fetch top 30 graduated Virtuals tokens by market cap.
+  // BASE_TOKENS take precedence if symbols collide.
   try {
-    await agent.syncCommands();
-    console.log("[testbot] commands registered ✓");
+    const virtualsTokens = await fetchTopVirtualsTokens(30);
+    TOKENS = { ...virtualsTokens, ...BASE_TOKENS };
+    const virtualsCount = Object.keys(virtualsTokens).length;
+    console.log(`[testbot] token list: ${Object.keys(TOKENS).length} tokens (${virtualsCount} Virtuals + ${Object.keys(BASE_TOKENS).length} Base)`);
   } catch (err) {
-    console.error("[testbot] failed to register commands:", err);
+    console.warn("[testbot] Virtuals token fetch failed — using Base-only list:", (err as Error).message);
   }
-});
+
+  const tokenChoices = Object.keys(TOKENS);
+
+  // Register tradelifi with the now-populated choices
+  agent.command("tradelifi", tradeLifiHandler, {
+    description: "Swap tokens via Li.Fi DEX aggregator (Base only)",
+    options: [
+      { name: "token-in",  type: "string" as const, description: "Token to sell",            required: true, choices: tokenChoices },
+      { name: "amount-in", type: "string" as const, description: "Amount to sell (e.g. 100)", required: true },
+      { name: "token-out", type: "string" as const, description: "Token to buy",              required: true, choices: tokenChoices },
+    ],
+  });
+
+  const app = express();
+  app.use(express.json());
+  app.post("/webhook", agent.express());
+  app.get("/health", (_req, res) => res.json({ ok: true }));
+
+  const port = Number(PORT ?? 3001);
+  app.listen(port, async () => {
+    console.log(`[testbot] http://localhost:${port}/webhook`);
+    try {
+      await agent.syncCommands();
+      console.log("[testbot] commands registered ✓");
+    } catch (err) {
+      console.error("[testbot] failed to register commands:", err);
+    }
+  });
+}
+
+main();
