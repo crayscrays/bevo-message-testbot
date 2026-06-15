@@ -518,15 +518,24 @@ async function tradeLifiHandler(ctx: CommandContext): Promise<void> {
   const minOutFormatted = formatAmount(quote.toAmountMin, quote.tokenOutDecimals);
   const needsApproval = allowance < amountInRaw;
 
-  const swapSummary = [
-    `Swap ${amountInHuman} ${quote.tokenInSymbol} → ${minOutFormatted} ${quote.tokenOutSymbol} (min)`,
-    `Route: ${quote.tool} | Slippage: 0.5% | Network: Base`,
-    needsApproval ? `⚠ Requires 2 signatures: approve ${quote.tokenInSymbol}, then swap.` : null,
-  ].filter(Boolean).join("\n");
-
   await d.updateWith({
     contentType: "onchain_tx",
-    content: swapSummary,
+    card: {
+      type: "app_card",
+      title: `Swap ${amountInHuman} ${quote.tokenInSymbol} → ${quote.tokenOutSymbol}`,
+      description: needsApproval
+        ? `⚠ Requires 2 signatures: approve ${quote.tokenInSymbol}, then swap.`
+        : `Tap Swap to confirm.`,
+      fields: [
+        { label: "You receive (min)", value: `${minOutFormatted} ${quote.tokenOutSymbol}` },
+        { label: "Route", value: quote.tool },
+        { label: "Slippage", value: "0.5%" },
+        { label: "Network", value: "Base" },
+      ],
+      actions: [
+        { id: "swap", label: `Swap ${amountInHuman} ${quote.tokenInSymbol}`, type: "action", payload: { action: "swap" } },
+      ],
+    },
     metadata: {
       execution: {
         type: "onchain_tx",
