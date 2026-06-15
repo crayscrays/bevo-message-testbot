@@ -465,23 +465,15 @@ async function tradeLifiHandler(ctx: CommandContext): Promise<void> {
   const minOutFormatted = formatAmount(quote.toAmountMin, quote.tokenOutDecimals);
   const needsApproval = allowance < amountInRaw;
 
+  const swapSummary = [
+    `Swap ${amountInHuman} ${quote.tokenInSymbol} → ${minOutFormatted} ${quote.tokenOutSymbol} (min)`,
+    `Route: ${quote.tool} | Slippage: 0.5% | Network: Base`,
+    needsApproval ? `⚠ Requires 2 signatures: approve ${quote.tokenInSymbol}, then swap.` : null,
+  ].filter(Boolean).join("\n");
+
   await d.updateWith({
     contentType: "contract_call",
-    card: {
-      type: "app_card",
-      title: `Swap ${amountInHuman} ${quote.tokenInSymbol} → ${quote.tokenOutSymbol}`,
-      description: needsApproval
-        ? `Requires 2 signatures: approve ${quote.tokenInSymbol}, then swap. Best route via ${quote.tool}.`
-        : `Best route via ${quote.tool} — found by Li.Fi.`,
-      fields: [
-        { label: "Sell",         value: `${amountInHuman} ${quote.tokenInSymbol}` },
-        { label: "Min. receive", value: `${minOutFormatted} ${quote.tokenOutSymbol}` },
-        { label: "Slippage",     value: "0.5%" },
-        { label: "Route",        value: quote.tool },
-        { label: "Network",      value: "Base" },
-        ...(needsApproval ? [{ label: "Approval", value: `Required for ${quote.tokenInSymbol}` }] : []),
-      ],
-    },
+    content: swapSummary,
     metadata: {
       executionStatus: "pending_action",
       // Primary execution = the swap
