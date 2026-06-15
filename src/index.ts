@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import { BevoAgent } from "@bevo/agent-sdk";
 import type { CommandContext } from "@bevo/agent-sdk";
+import { encodeFunctionData } from "viem";
 import {
   getLifiQuote,
   fetchTokenDecimals,
@@ -131,13 +132,13 @@ agent.command("ephemeral", async (ctx) => {
   });
 }, { description: "Send an ephemeral message (only visible to you)" });
 
-// 8. payment_request
+// 8. onchain_tx (payment / transfer)
 agent.command("payment", async (ctx) => {
   const d = await ctx.defer();
   await d.updateWith({
-    contentType: "payment_request",
+    contentType: "onchain_tx",
     card: {
-      type: "payment_request",
+      type: "app_card",
       title: "Payment Request",
       description: "Tap Pay to confirm the transfer.",
       fields: [
@@ -146,79 +147,88 @@ agent.command("payment", async (ctx) => {
         { label: "Network", value: "Base" },
       ],
       actions: [
-        {
-          id: "pay",
-          label: "Pay 0.01 USDC",
-          type: "transaction",
-          payload: {
-            token: "USDC",
-            amount: "0.01",
-            recipient: "0x0000000000000000000000000000000000001234",
-            chainId: 8453,
-          },
-        },
+        { id: "pay", label: "Pay 0.01 USDC", type: "action", payload: { action: "pay" } },
       ],
     },
-    metadata: { executionStatus: "pending_action" },
+    metadata: {
+      execution: {
+        type: "onchain_tx",
+        chainId: 8453,
+        // USDC transfer(0x0000…1234, 10000) — 0.01 USDC (6 decimals)
+        to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        data: encodeFunctionData({
+          abi: [{ name: "transfer", type: "function", stateMutability: "nonpayable", inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ name: "", type: "bool" }] }],
+          functionName: "transfer",
+          args: ["0x0000000000000000000000000000000000001234", 10000n],
+        }),
+        value: "0x0",
+        amount: "0.01",
+        currency: "USDC",
+        description: "Transfer 0.01 USDC to 0x0000…1234",
+      },
+    },
   });
 }, { description: "Send a payment request for 0.01 USDC" });
 
-// 9. contract_call
+// 9. onchain_tx (raw contract call)
 agent.command("contract", async (ctx) => {
   const d = await ctx.defer();
   await d.updateWith({
-    contentType: "contract_call",
+    contentType: "onchain_tx",
     content: "Sign to call approve() on USDC.",
     metadata: {
-      executionStatus: "pending_action",
-      contractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-      chainId: 8453,
-      functionName: "approve",
-      args: ["0x0000000000000000000000000000000000001234", "10000"],
-      abi: [
-        {
-          name: "approve",
-          type: "function",
-          stateMutability: "nonpayable",
-          inputs: [
-            { name: "spender", type: "address" },
-            { name: "amount", type: "uint256" },
-          ],
-          outputs: [{ name: "", type: "bool" }],
-        },
-      ],
+      execution: {
+        type: "onchain_tx",
+        chainId: 8453,
+        // USDC approve(0x0000…1234, 10000) — pre-encoded calldata
+        to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        data: encodeFunctionData({
+          abi: [{ name: "approve", type: "function", stateMutability: "nonpayable", inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ name: "", type: "bool" }] }],
+          functionName: "approve",
+          args: ["0x0000000000000000000000000000000000001234", 10000n],
+        }),
+        value: "0x0",
+        description: "Approve 0.01 USDC spend by 0x0000…1234",
+      },
     },
   });
-}, { description: "Send a contract_call (sign to execute)" });
+}, { description: "Send an onchain_tx contract call (sign to execute)" });
 
-// 10a. butler_action — fan-out to ALL group members with a provisioned butler
+// 10a. onchain_tx + all_butlers — fan-out swap to every group member's butler
 agent.command("butler", async (ctx) => {
   if (!ctx.payload.groupId || !ctx.payload.channelId) {
     ctx.reply("This command only works in a group channel.");
     return;
   }
   const d = await ctx.defer();
-  // sendMessage with targets triggers the server-side fan-out + policy evaluation
-  await (ctx.client.sendMessage as Function)({
+  await ctx.client.sendMessage({
     groupId: ctx.payload.groupId,
     channelId: ctx.payload.channelId,
-    contentType: "butler_action",
+    contentType: "onchain_tx",
     content: "Butler wants to swap 0.01 USDC → ETH on your behalf.",
     metadata: {
-      executionStatus: "pending_action",
       execution: {
-        type: "butler_action",
+        type: "onchain_tx",
+        chainId: 8453,
+        tradeParams: {
+          tokenIn: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC on Base
+          chainIn: 8453,
+          amountIn: 0.01,
+          tokenOut: "native",
+          chainOut: 8453,
+        },
         amount: "0.01",
         currency: "USDC",
         description: "Swap 0.01 USDC → ETH",
       },
     },
-    targets: "all_butlers", // broadcast to every member with a provisioned butler
+    targets: "all_butlers",
+    signingMode: "butler_auto",
   });
   await d.update("Butler action sent to all group members. Each member's policy will decide auto-execute or approval DM.");
-}, { description: "Fan-out a butler action to all group members" });
+}, { description: "Fan-out an onchain_tx swap to all group members via butler" });
 
-// 10b. butler_action — fan-out to a single @user
+// 10b. onchain_tx + targeted butler — swap for a specific @user
 agent.command("butler-one", async (ctx) => {
   if (!ctx.payload.groupId || !ctx.payload.channelId) {
     ctx.reply("This command only works in a group channel.");
@@ -231,41 +241,67 @@ agent.command("butler-one", async (ctx) => {
     return;
   }
   const d = await ctx.defer();
-  await (ctx.client.sendMessage as Function)({
+  await ctx.client.sendMessage({
     groupId: ctx.payload.groupId,
     channelId: ctx.payload.channelId,
-    contentType: "butler_action",
+    contentType: "onchain_tx",
     content: `Butler wants to swap 0.01 USDC → ETH on behalf of @${resolved.username ?? resolved.principalId}.`,
     metadata: {
-      executionStatus: "pending_action",
       execution: {
-        type: "butler_action",
+        type: "onchain_tx",
+        chainId: 8453,
+        tradeParams: {
+          tokenIn: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC on Base
+          chainIn: 8453,
+          amountIn: 0.01,
+          tokenOut: "native",
+          chainOut: 8453,
+        },
         amount: "0.01",
         currency: "USDC",
         description: "Swap 0.01 USDC → ETH",
-        toPrincipalId: resolved.principalId,
       },
     },
-    targets: [resolved.principalId], // target a single specific user
+    targets: [resolved.principalId],
+    signingMode: "butler_or_user",
   });
   await d.update(`Butler action sent to ${resolved.displayName ?? resolved.username ?? resolved.principalId}.`);
 }, {
-  description: "Fan-out a butler action to a specific user",
+  description: "Fan-out an onchain_tx swap to a specific user via butler",
   options: [{ name: "user", type: "user" as const, description: "Target user", required: true }],
 });
 
-// 11. approval_request
+// 11. onchain_tx with user_sign — always surfaces a signing prompt to the user
 agent.command("approve", async (ctx) => {
   const d = await ctx.defer();
-  await d.updateWith({
-    contentType: "approval_request",
-    content: "Testbot is requesting permission to read your wallet balance.",
+  if (!ctx.payload.groupId || !ctx.payload.channelId) {
+    await d.update("This command only works in a group channel.");
+    return;
+  }
+  await ctx.client.sendMessage({
+    groupId: ctx.payload.groupId,
+    channelId: ctx.payload.channelId,
+    contentType: "onchain_tx",
+    content: "Testbot requests your signature to approve 0.01 USDC spend.",
     metadata: {
-      executionStatus: "pending_action",
-      scope: ["wallet.read"],
+      execution: {
+        type: "onchain_tx",
+        chainId: 8453,
+        to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        data: encodeFunctionData({
+          abi: [{ name: "approve", type: "function", stateMutability: "nonpayable", inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ name: "", type: "bool" }] }],
+          functionName: "approve",
+          args: ["0x0000000000000000000000000000000000001234", 10000n],
+        }),
+        value: "0x0",
+        description: "Approve 0.01 USDC spend",
+      },
     },
+    targets: [ctx.payload.senderId],
+    signingMode: "user_sign",
   });
-}, { description: "Send an approval_request" });
+  await d.update("Approval request sent — check your notifications.");
+}, { description: "Request user signature via onchain_tx + user_sign" });
 
 // 12. reply
 agent.command("reply", async (ctx) => {
@@ -338,10 +374,17 @@ agent.command("request", async (ctx) => {
     : displayName;
 
   const d = await ctx.defer();
-  await d.updateWith({
-    contentType: "payment_request",
+  // Target the tagged user's butler/signing prompt via sendMessage
+  if (!ctx.payload.groupId || !ctx.payload.channelId) {
+    await d.update("This command only works in a group channel.");
+    return;
+  }
+  await ctx.client.sendMessage({
+    groupId: ctx.payload.groupId,
+    channelId: ctx.payload.channelId,
+    contentType: "onchain_tx",
     card: {
-      type: "payment_request",
+      type: "app_card",
       title: "Payment Request",
       description: `Requesting 0.01 USDC from ${displayName}.`,
       fields: [
@@ -351,21 +394,31 @@ agent.command("request", async (ctx) => {
         { label: "Network", value: "Base" },
       ],
       actions: [
-        {
-          id: "pay",
-          label: "Pay 0.01 USDC",
-          type: "transaction",
-          payload: {
-            token: "USDC",
-            amount: "0.01",
-            recipient: BOT_WALLET,
-            chainId: 8453,
-          },
-        },
+        { id: "pay", label: "Pay 0.01 USDC", type: "action", payload: { action: "pay" } },
       ],
     },
-    metadata: { executionStatus: "pending_action" },
+    metadata: {
+      execution: {
+        type: "onchain_tx",
+        chainId: 8453,
+        // USDC transfer(BOT_WALLET, 10000) — 0.01 USDC (6 decimals)
+        to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        data: encodeFunctionData({
+          abi: [{ name: "transfer", type: "function", stateMutability: "nonpayable", inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ name: "", type: "bool" }] }],
+          functionName: "transfer",
+          args: [BOT_WALLET as `0x${string}`, 10000n],
+        }),
+        value: "0x0",
+        amount: "0.01",
+        currency: "USDC",
+        fromPrincipalId: resolved.principalId,
+        description: `Pay 0.01 USDC to testbot`,
+      },
+    },
+    targets: [resolved.principalId],
+    signingMode: "butler_or_user",
   });
+  await d.update(`Payment request sent to ${displayName}.`);
 }, {
   description: "Request 0.01 USDC from a tagged user to this bot's wallet",
   options: [{ name: "user", type: "user" as const, description: "User to request payment from", required: true }],
@@ -472,31 +525,35 @@ async function tradeLifiHandler(ctx: CommandContext): Promise<void> {
   ].filter(Boolean).join("\n");
 
   await d.updateWith({
-    contentType: "contract_call",
+    contentType: "onchain_tx",
     content: swapSummary,
     metadata: {
-      executionStatus: "pending_action",
-      // Primary execution = the swap
       execution: {
-        type: "contract_call",
+        type: "onchain_tx",
         chainId: BASE_CHAIN_ID,
-        contractAddress: quote.transactionRequest.to,
-        description: `Swap ${amountInHuman} ${quote.tokenInSymbol} → ${quote.tokenOutSymbol} via Li.Fi (Base)`,
+        // Pre-encoded Li.Fi swap calldata — dispatched as raw calldata (to + data path)
+        to: quote.transactionRequest.to,
+        data: quote.transactionRequest.data,
+        value: quote.transactionRequest.value,
         amount: amountInHuman,
         currency: quote.tokenInSymbol,
         fromPrincipalId: ctx.payload.senderId,
+        description: `Swap ${amountInHuman} ${quote.tokenInSymbol} → ${quote.tokenOutSymbol} via Li.Fi (Base)`,
       },
-      // Pre-encoded calldata from Li.Fi — client sends this transaction directly.
-      transactionRequest: quote.transactionRequest,
-      // If approval is needed, client executes this first, then the swap.
+      // If the spender isn't already approved, the client executes this first.
       ...(needsApproval ? {
         approvalRequired: true,
         approvalExecution: {
+          type: "onchain_tx",
           chainId: BASE_CHAIN_ID,
-          contractAddress: tokenInMeta.address,
-          functionName: "approve",
-          args: [quote.approvalAddress, amountInRaw.toString()],
-          abi: ERC20_APPROVE_ABI,
+          to: tokenInMeta.address,
+          data: encodeFunctionData({
+            abi: ERC20_APPROVE_ABI,
+            functionName: "approve",
+            args: [quote.approvalAddress as `0x${string}`, amountInRaw],
+          }),
+          value: "0x0",
+          description: `Approve ${quote.tokenInSymbol} spend by Li.Fi router`,
         },
       } : {}),
     },
@@ -519,16 +576,16 @@ agent.command("all", async (ctx) => {
         { name: "/tip",        value: "agent_tip",        inline: true },
         { name: "/info",       value: "agent_info",       inline: true },
         { name: "/ephemeral",  value: "ephemeral",        inline: true },
-        { name: "/payment",    value: "payment_request",  inline: true },
-        { name: "/contract",   value: "contract_call",    inline: true },
-        { name: "/butler",     value: "butler_action → all",  inline: true },
-        { name: "/butler-one", value: "butler_action → @user", inline: true },
-        { name: "/approve",    value: "approval_request", inline: true },
+        { name: "/payment",    value: "onchain_tx (transfer)",        inline: true },
+        { name: "/contract",   value: "onchain_tx (calldata)",        inline: true },
+        { name: "/butler",     value: "onchain_tx → all_butlers",     inline: true },
+        { name: "/butler-one", value: "onchain_tx → @user butler",    inline: true },
+        { name: "/approve",    value: "onchain_tx + user_sign",       inline: true },
         { name: "/reply",      value: "reply",            inline: true },
         { name: "/attachment", value: "attachment",       inline: true },
         { name: "/link",       value: "link_unfurl",      inline: true },
-        { name: "/request",    value: "payment_request → @user",       inline: true },
-        { name: "/tradelifi", value: "contract_call → Li.Fi DEX swap",  inline: true },
+        { name: "/request",    value: "onchain_tx → @user (request payment)", inline: true },
+        { name: "/tradelifi", value: "onchain_tx → Li.Fi DEX swap",         inline: true },
       ],
     },
   });
