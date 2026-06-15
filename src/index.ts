@@ -561,7 +561,7 @@ async function main() {
     options: [
       { name: "token-in",  type: "token" as const,  description: "Token to sell from your wallet", required: true },
       { name: "amount-in", type: "string" as const,  description: "Amount to sell (e.g. 100)",      required: true },
-      { name: "token-out", type: "string" as const,  description: "Token to buy",                   required: true, choices: Object.keys(BASE_TOKENS) },
+      { name: "token-out", type: "string" as const,  description: "Token to buy",                   required: true, choices: Object.keys(TOKENS) },
     ],
   });
 
