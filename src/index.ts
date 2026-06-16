@@ -508,11 +508,10 @@ async function tradeLifiAllHandler(ctx: CommandContext): Promise<void> {
     signingMode: "butler_or_user" as const,
   };
 
-  await Promise.all(
-    members.map((m) =>
-      ctx.client.sendMessage({ ...messagePayload, targets: [m.principalId] })
-    )
-  );
+  await ctx.client.sendMessage({
+    ...messagePayload,
+    targets: members.map((m) => m.principalId),
+  });
 
   await d.updateWith({
     contentType: "app_card",
