@@ -514,7 +514,20 @@ async function tradeLifiAllHandler(ctx: CommandContext): Promise<void> {
     )
   );
 
-  await d.update(`Trade proposal sent to ${members.length} group member(s): Swap ${amountIn} ${tokenInMeta.symbol} → ${tokenOutMeta.symbol}.`);
+  await d.updateWith({
+    contentType: "app_card",
+    card: {
+      type: "app_card",
+      title: `Swap ${amountIn} ${tokenInMeta.symbol} → ${tokenOutMeta.symbol}`,
+      description: `Trade proposal broadcast. Each member received their own signing request.`,
+      fields: [
+        { label: "You sell",  value: `${amountIn} ${tokenInMeta.symbol}` },
+        { label: "You buy",   value: tokenOutMeta.symbol },
+        { label: "Network",   value: "Base" },
+        { label: "Sent to",   value: `${members.length} user${members.length === 1 ? "" : "s"}` },
+      ],
+    },
+  });
 }
 
 // 16b. tradelifi — handler extracted so main() can register it with dynamic choices
