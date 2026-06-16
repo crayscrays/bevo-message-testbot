@@ -463,12 +463,20 @@ async function tradeLifiAllHandler(ctx: CommandContext): Promise<void> {
 
   const d = await ctx.defer();
 
-  await ctx.client.sendMessage({
+  let members: Awaited<ReturnType<typeof ctx.client.getGroupMembers>>;
+  try {
+    members = await ctx.client.getGroupMembers(ctx.payload.groupId);
+  } catch (err) {
+    await d.update(`Could not fetch group members: ${(err as Error).message}`);
+    return;
+  }
+
+  const messagePayload = {
     groupId: ctx.payload.groupId,
     channelId: ctx.payload.channelId,
-    contentType: "onchain_tx",
+    contentType: "onchain_tx" as const,
     card: {
-      type: "app_card",
+      type: "app_card" as const,
       title: `Swap ${amountIn} ${tokenInMeta.symbol} → ${tokenOutMeta.symbol}`,
       description: `Tap Swap to execute this trade from your own wallet via Li.Fi.`,
       fields: [
@@ -478,7 +486,7 @@ async function tradeLifiAllHandler(ctx: CommandContext): Promise<void> {
         { label: "Powered by", value: "Li.Fi" },
       ],
       actions: [
-        { id: "swap", label: `Swap ${amountIn} ${tokenInMeta.symbol}`, type: "action", payload: { action: "swap" } },
+        { id: "swap", label: `Swap ${amountIn} ${tokenInMeta.symbol}`, type: "action" as const, payload: { action: "swap" } },
       ],
     },
     metadata: {
@@ -497,11 +505,16 @@ async function tradeLifiAllHandler(ctx: CommandContext): Promise<void> {
         description: `Swap ${amountIn} ${tokenInMeta.symbol} → ${tokenOutMeta.symbol} via Li.Fi (Base)`,
       },
     },
-    targets: "all_butlers",
-    signingMode: "butler_or_user",
-  });
+    signingMode: "butler_or_user" as const,
+  };
 
-  await d.update(`Trade proposal broadcast to all group members: Swap ${amountIn} ${tokenInMeta.symbol} → ${tokenOutMeta.symbol}.`);
+  await Promise.all(
+    members.map((m) =>
+      ctx.client.sendMessage({ ...messagePayload, targets: [m.principalId] })
+    )
+  );
+
+  await d.update(`Trade proposal sent to ${members.length} group member(s): Swap ${amountIn} ${tokenInMeta.symbol} → ${tokenOutMeta.symbol}.`);
 }
 
 // 16b. tradelifi — handler extracted so main() can register it with dynamic choices
