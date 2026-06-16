@@ -424,7 +424,87 @@ agent.command("request", async (ctx) => {
   options: [{ name: "user", type: "user" as const, description: "User to request payment from", required: true }],
 });
 
-// 16. tradelifi — handler extracted so main() can register it with dynamic choices
+// 16a. tradelifiall — broadcast a swap proposal to every group member (butler_or_user)
+async function tradeLifiAllHandler(ctx: CommandContext): Promise<void> {
+  const tokenInKey  = ctx.payload.options["token-in"]  as string | undefined;
+  const amountIn    = ctx.payload.options["amount"]    as string | undefined;
+  const tokenOutKey = ctx.payload.options["token-out"] as string | undefined;
+
+  if (!tokenInKey || !amountIn || !tokenOutKey) {
+    ctx.reply("Usage: /tradelifiall <token-in> <amount> <token-out>");
+    return;
+  }
+  if (!ctx.payload.groupId || !ctx.payload.channelId) {
+    ctx.reply("This command only works in a group channel.");
+    return;
+  }
+
+  const amountNum = Number(amountIn);
+  if (isNaN(amountNum) || amountNum <= 0) {
+    ctx.reply("Amount must be a positive number.");
+    return;
+  }
+
+  const tokenInMeta  = TOKENS[tokenInKey];
+  const tokenOutMeta = TOKENS[tokenOutKey];
+
+  if (!tokenInMeta) {
+    ctx.reply(`"${tokenInKey}" is not a recognised token.`);
+    return;
+  }
+  if (!tokenOutMeta) {
+    ctx.reply(`"${tokenOutKey}" is not a recognised token.`);
+    return;
+  }
+  if (tokenInMeta.address.toLowerCase() === tokenOutMeta.address.toLowerCase()) {
+    ctx.reply("token-in and token-out cannot be the same token.");
+    return;
+  }
+
+  const d = await ctx.defer();
+
+  await ctx.client.sendMessage({
+    groupId: ctx.payload.groupId,
+    channelId: ctx.payload.channelId,
+    contentType: "onchain_tx",
+    card: {
+      type: "app_card",
+      title: `Swap ${amountIn} ${tokenInMeta.symbol} → ${tokenOutMeta.symbol}`,
+      description: `Tap Swap to execute this trade from your own wallet via Li.Fi.`,
+      fields: [
+        { label: "You sell",   value: `${amountIn} ${tokenInMeta.symbol}` },
+        { label: "You buy",   value: tokenOutMeta.symbol },
+        { label: "Network",   value: "Base" },
+        { label: "Powered by", value: "Li.Fi" },
+      ],
+      actions: [
+        { id: "swap", label: `Swap ${amountIn} ${tokenInMeta.symbol}`, type: "action", payload: { action: "swap" } },
+      ],
+    },
+    metadata: {
+      execution: {
+        type: "onchain_tx",
+        chainId: BASE_CHAIN_ID,
+        tradeParams: {
+          tokenIn: tokenInMeta.address,
+          chainIn: BASE_CHAIN_ID,
+          amountIn: amountNum,
+          tokenOut: tokenOutMeta.address,
+          chainOut: BASE_CHAIN_ID,
+        },
+        amount: amountIn,
+        currency: tokenInMeta.symbol,
+        description: `Swap ${amountIn} ${tokenInMeta.symbol} → ${tokenOutMeta.symbol} via Li.Fi (Base)`,
+      },
+    },
+    targets: "all_butlers",
+    signingMode: "butler_or_user",
+  });
+
+  await d.update(`Trade proposal broadcast to all group members: Swap ${amountIn} ${tokenInMeta.symbol} → ${tokenOutMeta.symbol}.`);
+}
+
+// 16b. tradelifi — handler extracted so main() can register it with dynamic choices
 async function tradeLifiHandler(ctx: CommandContext): Promise<void> {
   const tokenInKey    = ctx.payload.options["token-in"]   as string | undefined;
   const amountInHuman = ctx.payload.options["amount-in"]  as string | undefined;
@@ -594,7 +674,8 @@ agent.command("all", async (ctx) => {
         { name: "/attachment", value: "attachment",       inline: true },
         { name: "/link",       value: "link_unfurl",      inline: true },
         { name: "/request",    value: "onchain_tx → @user (request payment)", inline: true },
-        { name: "/tradelifi", value: "onchain_tx → Li.Fi DEX swap",         inline: true },
+        { name: "/tradelifi",    value: "onchain_tx → Li.Fi DEX swap",                     inline: true },
+        { name: "/tradelifiall", value: "onchain_tx → Li.Fi swap broadcast (butler_or_user)", inline: true },
       ],
     },
   });
@@ -612,6 +693,16 @@ async function main() {
   } catch (err) {
     console.warn("[testbot] Virtuals token fetch failed — using Base-only list:", (err as Error).message);
   }
+
+  // Register tradelifiall — broadcast swap to all group members
+  agent.command("tradelifiall", tradeLifiAllHandler, {
+    description: "Broadcast a Li.Fi swap proposal to all group members (butler_or_user)",
+    options: [
+      { name: "token-in",  type: "string" as const, description: "Token to sell",              required: true, choices: Object.keys(TOKENS) },
+      { name: "amount",    type: "string" as const, description: "Amount to sell (e.g. 100)",  required: true },
+      { name: "token-out", type: "string" as const, description: "Token to buy",               required: true, choices: Object.keys(TOKENS) },
+    ],
+  });
 
   // Register tradelifi with the now-populated token list
   agent.command("tradelifi", tradeLifiHandler, {
